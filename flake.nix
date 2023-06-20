@@ -20,6 +20,13 @@
               final.haskell-nix.hix.project {
                 src = ./.;
                 evalSystem = "x86_64-linux";
+                shell.tools = {
+                  hlint = {};
+                  haskell-language-server = {};
+                };
+                shell.buildInputs = with pkgs; [
+                  nixfmt
+                ];
               };
           })
         ];
@@ -28,7 +35,7 @@
       in flake // {
         legacyPackages = pkgs;
 
-        packages.default = flake.packages."hello:exe:hello";
+        packages.default = flake.packages."scheme:lib";
       });
 
   # --- Flake Local Nix Configuration ----------------------------
