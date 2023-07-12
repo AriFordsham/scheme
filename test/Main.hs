@@ -55,9 +55,25 @@ main = hspec $ do
   it "null? is false for non-null" $
     execute (list [Symbol "null?", quote $ list [Symbol "a"]])
       `shouldBe` Right (Bool False)
-  it "begin sequences" $
-    execute (list [Symbol "begin", quote $ Symbol "a", quote $ Symbol "b"])
-      `shouldBe` Right (Symbol "b")
   it "addition works" $
     execute (list [Symbol "+", Number 1, Number 1])
       `shouldBe` Right (Number 2)
+  it "simple if" $
+    execute
+      ( list
+          [ Symbol "if"
+          , Bool True
+          , quote $ Symbol "a"
+          ]
+      )
+      `shouldBe` Right (Symbol "a")
+  it "if with else" $
+    execute
+      ( list
+          [ Symbol "if"
+          , Bool False
+          , quote $ Symbol "a"
+          , quote $ Symbol "b"
+          ]
+      )
+      `shouldBe` Right (Symbol "b")

@@ -1,24 +1,30 @@
+{-# LANGUAGE DataKinds #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE LambdaCase #-}
 
 module Scheme where
 
 import Control.Monad ((>=>))
-import Data.Foldable (foldl', foldrM)
+import Data.Coerce (coerce)
+import Data.Foldable (foldrM)
 import Data.Map (Map)
 import Data.Map qualified as Map
 
-type Proc = [Value] -> Either InterpretError Value
+type Proc = [Value 'Evaluate] -> Either SchemeError (Value 'Evaluate)
 
-data Value
-  = Bool Bool
-  | Char Char
-  | Null
-  | Number Int
-  | Pair Value Value
-  | Symbol String
-  | Builtin Proc
+data Stage = Interpret | Evaluate
 
-instance Show Value where
+data Value (s :: Stage) where
+  Bool :: Bool -> Value s
+  Char :: Char -> Value s
+  Null :: Value s
+  Number :: Int -> Value s
+  Pair :: Value s -> Value s -> Value s
+  Symbol :: String -> Value s
+  Builtin :: Proc -> Value 'Evaluate
+
+instance Show (Value s) where
   show = \case
     Bool b -> "Bool " <> show b
     Char c -> "Char " <> show c
@@ -28,7 +34,7 @@ instance Show Value where
     Symbol s -> "Symbol " <> show s
     Builtin _ -> "Builtin"
 
-instance Eq Value where
+instance Eq (Value s) where
   Bool a == Bool b = a == b
   Char a == Char b = a == b
   Null == Null = True
@@ -38,35 +44,43 @@ instance Eq Value where
   Builtin _ == Builtin _ = False
   _ == _ = False
 
-data Expr
-  = Var String
-  | Literal Value
-  | Call Expr [Expr]
-  deriving (Eq, Show)
+data Expr where
+  Var :: String -> Expr
+  Value :: (forall s. Value s) -> Expr
+  Call :: Expr -> [Expr] -> Expr
+  If :: Expr -> Expr -> (Maybe Expr) -> Expr
 
-list :: [Value] -> Value
+deriving instance Show Expr
+instance Eq Expr
+
+list :: [Value s] -> Value s
 list = foldr Pair Null
 
-quote :: Value -> Value
+quote :: Value s -> Value s
 quote d = list [Symbol "quote", d]
 
-specials :: Map String ([Value] -> Either InterpretError Expr)
+specials :: Map String ([forall s. Value s] -> Either SchemeError Expr)
 specials =
   Map.fromList
     [
       ( "quote"
       , \case
-          [a] -> Right (Literal a)
+          [a] -> Right (Value a)
           args -> Left (WrongNumArgs "quote" args)
       )
     ,
-      ( "begin"
-      , \args ->
-          foldl' (const interpret) (Left $ WrongNumArgs "begin" args) args
+      ( "if"
+      , \case
+          args@(tst : t : f) ->
+            If <$> interpret tst <*> interpret t <*> case f of
+              [] -> Right Nothing
+              [e] -> Just <$> interpret e
+              _ -> Left (WrongNumArgs "if" args)
+          args -> Left (WrongNumArgs "if" args)
       )
     ]
 
-procs :: Map String Value
+procs :: Map String (Value 'Evaluate)
 procs =
   Map.fromList
     [ unary "car" $
@@ -95,7 +109,7 @@ procs =
       )
     ]
  where
-  unary :: String -> (Value -> Maybe Value) -> (String, Value)
+  unary :: String -> (Value 'Evaluate -> Maybe (Value 'Evaluate)) -> (String, Value 'Evaluate)
   unary name f =
     ( name
     , Builtin $ \case
@@ -103,19 +117,21 @@ procs =
         args -> Left (WrongNumArgs name args)
     )
 
-  add :: Value -> Value -> Maybe Value
+  add :: Value 'Evaluate -> Value 'Evaluate -> Maybe (Value 'Evaluate)
   add (Number a) (Number b) = Just (Number (a + b))
   add _ _ = Nothing
 
-data InterpretError
-  = NoSuchProc String
-  | ArgsNotAList
-  | ApplyingNonProc
-  | WrongNumArgs String [Value]
-  | BadArgs String [Value]
-  deriving (Eq, Show)
+data SchemeError where
+  NoSuchProc :: String -> SchemeError
+  ArgsNotAList :: SchemeError
+  ApplyingNonProc :: SchemeError
+  WrongNumArgs :: String -> [Value s] -> SchemeError
+  BadArgs :: String -> [Value 'Evaluate] -> SchemeError
+  Undefined :: SchemeError
 
-interpret :: Value -> Either InterpretError Expr
+deriving instance Show SchemeError
+
+interpret :: (forall s. Value s) -> Either SchemeError Expr
 interpret (Symbol s) = Right (Var s)
 interpret (Pair p args) = do
   args' <- interpretList args
@@ -123,24 +139,31 @@ interpret (Pair p args) = do
     Symbol s -> maybe (mkCall p args') ($ args') (Map.lookup s specials)
     _ -> mkCall p args'
  where
-  interpretList :: Value -> Either InterpretError [Value]
-  interpretList Null = Right []
-  interpretList (Pair a b) = (a :) <$> interpretList b
-  interpretList _ = Left ArgsNotAList
-
-  mkCall :: Value -> [Value] -> Either InterpretError Expr
+  mkCall :: (forall s. Value s) -> [forall s. Value s] -> Either SchemeError Expr
   mkCall p' args' = Call <$> interpret p' <*> traverse interpret args'
-interpret d = Right (Literal d)
+interpret d = Right (Value d)
 
-evaluate :: Expr -> Either InterpretError Value
+interpretList :: (forall s. Value s) -> Either SchemeError [forall s. Value s]
+interpretList Null = Right []
+interpretList (Pair a b) = (a :) <$> interpretList b
+interpretList _ = Left ArgsNotAList
+
+evaluate :: Expr -> Either SchemeError (Value 'Evaluate)
 evaluate (Var s) = maybe (Left $ NoSuchProc s) Right (Map.lookup s procs)
-evaluate (Literal d) = Right d
+evaluate (Value d) = Right (coerce d)
 evaluate (Call p args) = do
   p' <- evaluate p
   args' <- traverse evaluate args
   case p' of
     Builtin f -> f args'
     _ -> Left ApplyingNonProc
+evaluate (If tst t f) = do
+  tst' <- evaluate tst
+  if tst' /= Bool False
+    then evaluate t
+    else case f of
+      Nothing -> Left Undefined
+      Just f' -> evaluate f'
 
-execute :: Value -> Either InterpretError Value
+execute :: (forall s. Value s) -> Either SchemeError (Value 'Evaluate)
 execute = interpret >=> evaluate
