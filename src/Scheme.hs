@@ -6,7 +6,6 @@
 module Scheme where
 
 import Control.Monad ((>=>))
-import Data.Coerce (coerce)
 import Data.Foldable (foldrM)
 import Data.Map (Map)
 import Data.Map qualified as Map
@@ -86,7 +85,7 @@ specials =
       )
     ]
 
-procs :: Map String (Value 'Evaluate)
+procs :: Map String Proc
 procs =
   Map.fromList
     [ unary "car" $
@@ -98,7 +97,7 @@ procs =
         _ -> Nothing
     ,
       ( "cons"
-      , Builtin $ \case
+      , \case
           [a, b] -> Right (Pair a b)
           args -> Left (BadArgs "cons" args)
       )
@@ -107,7 +106,7 @@ procs =
         _ -> Just (Bool False)
     ,
       ( "+"
-      , Builtin $ \args ->
+      , \args ->
           foldrM
             (\a b -> maybe (Left $ BadArgs "+" args) Right $ add a b)
             (Number 0)
@@ -118,10 +117,10 @@ procs =
   unary ::
     String ->
     (Value 'Evaluate -> Maybe (Value 'Evaluate)) ->
-    (String, Value 'Evaluate)
+    (String, Proc)
   unary name f =
     ( name
-    , Builtin $ \case
+    , \case
         [a] -> maybe (Left $ BadArgs name [a]) Right (f a)
         args -> Left (WrongNumArgs name args)
     )
@@ -157,8 +156,9 @@ interpretList (Pair a b) = (a :) <$> interpretList b
 interpretList _ = Left ArgsNotAList
 
 evaluate :: Expr -> Either SchemeError (Value 'Evaluate)
-evaluate (Var s) = maybe (Left $ NoSuchProc s) Right (Map.lookup s procs)
-evaluate (Value d) = Right (coerce d)
+evaluate (Var s) =
+  maybe (Left $ NoSuchProc s) (Right . Builtin) (Map.lookup s procs)
+evaluate (Value d) = Right d
 evaluate (Call p args) = do
   p' <- evaluate p
   args' <- traverse evaluate args
