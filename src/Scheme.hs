@@ -24,6 +24,15 @@ data Value (s :: Stage) where
   Symbol :: String -> Value s
   Builtin :: Proc -> Value 'Evaluate
 
+castValue :: Value 'Interpret -> Value 'Evaluate
+castValue = \case
+  Bool b -> Bool b
+  Char c -> Char c
+  Null -> Null
+  Number n -> Number n
+  Pair a b -> Pair (castValue a) (castValue b)
+  Symbol s -> Symbol s
+
 instance Show (Value s) where
   show = \case
     Bool b -> "Bool " <> show b
@@ -46,12 +55,11 @@ instance Eq (Value s) where
 
 data Expr where
   Var :: String -> Expr
-  Value :: (forall s. Value s) -> Expr
+  Value :: Value 'Evaluate -> Expr
   Call :: Expr -> [Expr] -> Expr
   If :: Expr -> Expr -> (Maybe Expr) -> Expr
 
 deriving instance Show Expr
-instance Eq Expr
 
 list :: [Value s] -> Value s
 list = foldr Pair Null
@@ -59,14 +67,14 @@ list = foldr Pair Null
 quote :: Value s -> Value s
 quote d = list [Symbol "quote", d]
 
-specials :: Map String ([forall s. Value s] -> Either SchemeError Expr)
+specials :: Map String ([Value 'Interpret] -> Either SchemeError Expr)
 specials =
   Map.fromList
     [
       ( "quote"
       , \case
-          [a] -> Right (Value a)
-          args -> Left (WrongNumArgs "quote" args)
+          [a] -> Right (Value $ castValue a)
+          args -> Left (WrongNumArgs "quote" (castValue <$> args))
       )
     ,
       ( "if"
@@ -75,8 +83,8 @@ specials =
             If <$> interpret tst <*> interpret t <*> case f of
               [] -> Right Nothing
               [e] -> Just <$> interpret e
-              _ -> Left (WrongNumArgs "if" args)
-          args -> Left (WrongNumArgs "if" args)
+              _ -> Left (WrongNumArgs "if" (castValue <$> args))
+          args -> Left (WrongNumArgs "if" (castValue <$> args))
       )
     ]
 
@@ -109,7 +117,10 @@ procs =
       )
     ]
  where
-  unary :: String -> (Value 'Evaluate -> Maybe (Value 'Evaluate)) -> (String, Value 'Evaluate)
+  unary ::
+    String ->
+    (Value 'Evaluate -> Maybe (Value 'Evaluate)) ->
+    (String, Value 'Evaluate)
   unary name f =
     ( name
     , Builtin $ \case
@@ -125,13 +136,12 @@ data SchemeError where
   NoSuchProc :: String -> SchemeError
   ArgsNotAList :: SchemeError
   ApplyingNonProc :: SchemeError
-  WrongNumArgs :: String -> [Value s] -> SchemeError
+  WrongNumArgs :: String -> [Value 'Evaluate] -> SchemeError
   BadArgs :: String -> [Value 'Evaluate] -> SchemeError
   Undefined :: SchemeError
+  deriving (Eq, Show)
 
-deriving instance Show SchemeError
-
-interpret :: (forall s. Value s) -> Either SchemeError Expr
+interpret :: Value 'Interpret -> Either SchemeError Expr
 interpret (Symbol s) = Right (Var s)
 interpret (Pair p args) = do
   args' <- interpretList args
@@ -139,11 +149,11 @@ interpret (Pair p args) = do
     Symbol s -> maybe (mkCall p args') ($ args') (Map.lookup s specials)
     _ -> mkCall p args'
  where
-  mkCall :: (forall s. Value s) -> [forall s. Value s] -> Either SchemeError Expr
+  mkCall :: Value 'Interpret -> [Value 'Interpret] -> Either SchemeError Expr
   mkCall p' args' = Call <$> interpret p' <*> traverse interpret args'
-interpret d = Right (Value d)
+interpret d = Right (Value $ castValue d)
 
-interpretList :: (forall s. Value s) -> Either SchemeError [forall s. Value s]
+interpretList :: Value s -> Either SchemeError [Value s]
 interpretList Null = Right []
 interpretList (Pair a b) = (a :) <$> interpretList b
 interpretList _ = Left ArgsNotAList
@@ -165,5 +175,5 @@ evaluate (If tst t f) = do
       Nothing -> Left Undefined
       Just f' -> evaluate f'
 
-execute :: (forall s. Value s) -> Either SchemeError (Value 'Evaluate)
+execute :: Value 'Interpret -> Either SchemeError (Value 'Evaluate)
 execute = interpret >=> evaluate
