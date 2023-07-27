@@ -50,7 +50,6 @@ instance Eq (Value s) where
   Number a == Number b = a == b
   Pair a b == Pair c d = a == c && b == d
   Symbol a == Symbol b = a == b
-  Builtin _ == Builtin _ = False
   _ == _ = False
 
 data Expr where
@@ -58,8 +57,7 @@ data Expr where
   Value :: Value 'Evaluate -> Expr
   Call :: Expr -> [Expr] -> Expr
   If :: Expr -> Expr -> (Maybe Expr) -> Expr
-
-deriving instance Show Expr
+  deriving (Eq, Show)
 
 list :: [Value s] -> Value s
 list = foldr Pair Null
