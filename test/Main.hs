@@ -77,3 +77,15 @@ main = hspec $ do
           ]
       )
       `shouldBe` Right (Symbol "b")
+  it "simple lambda" $
+    execute
+      ( list
+          [ list
+              [ Symbol "lambda"
+              , list [Symbol "x"]
+              , Symbol "x"
+              ]
+          , quote $ Symbol "a"
+          ]
+      )
+      `shouldBe` Right (Symbol "a")

@@ -6,11 +6,14 @@
 module Scheme where
 
 import Control.Monad ((>=>))
+import Data.Bifunctor (Bifunctor (first))
 import Data.Foldable (foldrM)
 import Data.Map (Map)
 import Data.Map qualified as Map
 
 type Proc = [Value 'Evaluate] -> Either SchemeError (Value 'Evaluate)
+
+type Env = Map String (Value 'Evaluate)
 
 data Stage = Interpret | Evaluate
 
@@ -22,6 +25,7 @@ data Value (s :: Stage) where
   Pair :: Value s -> Value s -> Value s
   Symbol :: String -> Value s
   Builtin :: Proc -> Value 'Evaluate
+  Lambda :: [String] -> Maybe String -> Expr -> Value 'Evaluate
 
 castValue :: Value 'Interpret -> Value 'Evaluate
 castValue = \case
@@ -41,6 +45,7 @@ instance Show (Value s) where
     Pair a b -> "Pair (" <> show a <> ") (" <> show b <> ")"
     Symbol s -> "Symbol " <> show s
     Builtin _ -> "Builtin"
+    Lambda{} -> "Lambda"
 
 instance Eq (Value s) where
   Bool a == Bool b = a == b
@@ -82,6 +87,33 @@ specials =
               [e] -> Just <$> interpret e
               _ -> Left (WrongNumArgs "if" (castValue <$> args))
           args -> Left (WrongNumArgs "if" (castValue <$> args))
+      )
+    ,
+      ( "lambda"
+      , \case
+          (args : body) ->
+            case interpretImproperList args of
+              (args', var) ->
+                Value
+                  <$> ( Lambda
+                          <$> traverse
+                            ( \case
+                                Symbol s -> Right s
+                                _ -> Left BadVar
+                            )
+                            args'
+                          <*> ( case var of
+                                  Null -> Right Nothing
+                                  Symbol s -> Right (Just s)
+                                  _ -> Left BadVar
+                              )
+                          <*> ( case body of
+                                  [b] -> interpret b
+                                  _ -> 
+                                    Left $ BadArgs "lambda" (castValue <$> body)
+                              )
+                      )
+          [] -> Left (WrongNumArgs "lambda" [])
       )
     ]
 
@@ -130,12 +162,13 @@ procs =
   add _ _ = Nothing
 
 data SchemeError where
-  NoSuchProc :: String -> SchemeError
+  NotInScope :: String -> SchemeError
   ArgsNotAList :: SchemeError
   ApplyingNonProc :: SchemeError
   WrongNumArgs :: String -> [Value 'Evaluate] -> SchemeError
   BadArgs :: String -> [Value 'Evaluate] -> SchemeError
   Undefined :: SchemeError
+  BadVar :: SchemeError
   deriving (Eq, Show)
 
 interpret :: Value 'Interpret -> Either SchemeError Expr
@@ -150,28 +183,43 @@ interpret (Pair p args) = do
   mkCall p' args' = Call <$> interpret p' <*> traverse interpret args'
 interpret d = Right (Value $ castValue d)
 
-interpretList :: Value s -> Either SchemeError [Value s]
-interpretList Null = Right []
-interpretList (Pair a b) = (a :) <$> interpretList b
-interpretList _ = Left ArgsNotAList
+interpretImproperList :: Value s -> ([Value s], Value s)
+interpretImproperList (Pair a b) = first (a :) (interpretImproperList b)
+interpretImproperList d = ([], d)
 
-evaluate :: Expr -> Either SchemeError (Value 'Evaluate)
-evaluate (Var s) =
-  maybe (Left $ NoSuchProc s) (Right . Builtin) (Map.lookup s procs)
-evaluate (Value d) = Right d
-evaluate (Call p args) = do
-  p' <- evaluate p
-  args' <- traverse evaluate args
+interpretList :: Value s -> Either SchemeError [Value s]
+interpretList v = case interpretImproperList v of
+  (args, Null) -> Right args
+  _ -> Left ArgsNotAList
+
+evaluate :: Env -> Expr -> Either SchemeError (Value 'Evaluate)
+evaluate e (Var s) =
+  maybe (Left $ NotInScope s) Right (Map.lookup s e)
+evaluate _ (Value d) = Right d
+evaluate e (Call p args) = do
+  p' <- evaluate e p
+  args' <- traverse (evaluate e) args
   case p' of
     Builtin f -> f args'
+    Lambda args'' var body -> do
+      e' <- zipArgs args'' args' var
+      evaluate (e' <> e) body
     _ -> Left ApplyingNonProc
-evaluate (If tst t f) = do
-  tst' <- evaluate tst
+evaluate e (If tst t f) = do
+  tst' <- evaluate e tst
   if tst' /= Bool False
-    then evaluate t
+    then evaluate e t
     else case f of
       Nothing -> Left Undefined
-      Just f' -> evaluate f'
+      Just f' -> evaluate e f'
+
+zipArgs :: [String] -> [Value 'Evaluate] -> Maybe String -> Either SchemeError Env
+zipArgs [] [] mv =
+  Right $ Map.empty <> maybe Map.empty (\v -> Map.singleton v (list [])) mv
+zipArgs (s : ss) (a : as) v = Map.insert s a <$> zipArgs ss as v
+zipArgs [] as (Just v) = Right $ Map.singleton v (list as)
+zipArgs [] as Nothing = Left (WrongNumArgs "lambda" as)
+zipArgs (_:_) [] _ = Left (WrongNumArgs "lambda" [])
 
 execute :: Value 'Interpret -> Either SchemeError (Value 'Evaluate)
-execute = interpret >=> evaluate
+execute = interpret >=> evaluate (Builtin <$> procs)
