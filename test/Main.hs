@@ -1,22 +1,31 @@
+{-# LANGUAGE DataKinds #-}
+
 module Main (main) where
 
 import Test.Hspec
 
-import Scheme
+import Scheme (
+  Value (Bool, Char, Null, Number, Symbol),
+  ValueExt (ValueExt),
+  execute,
+  lambda,
+  list,
+  quote,
+ )
 
 main :: IO ()
 main = hspec $ do
   it "Booleans evaluate to themselves" $
-    execute (Bool True) `shouldBe` Right (Bool True)
+    execute (Bool True) `shouldBe` Right (ValueExt (Bool True))
   it "Numbers evaluate to themselves" $
-    execute (Number 1) `shouldBe` Right (Number 1)
+    execute (Number 1) `shouldBe` Right (ValueExt (Number 1))
   it "Characters evaluate to themselves" $
-    execute (Char 'a') `shouldBe` Right (Char 'a')
+    execute (Char 'a') `shouldBe` Right (ValueExt (Char 'a'))
   it "Null evaluates to itself" $
-    execute Null `shouldBe` Right Null
+    execute Null `shouldBe` Right (ValueExt Null)
   it "car" $
     execute (list [Symbol "car", quote $ list [Symbol "a", Symbol "b", Symbol "c"]])
-      `shouldBe` Right (Symbol "a")
+      `shouldBe` Right (ValueExt (Symbol "a"))
   it "nested car" $
     execute
       ( list
@@ -31,16 +40,16 @@ main = hspec $ do
               ]
           ]
       )
-      `shouldBe` Right (Symbol "a")
+      `shouldBe` Right (ValueExt (Symbol "a"))
   it "cdr" $
     execute
       ( list
           [Symbol "cdr", quote $ list [Symbol "a", Symbol "b", Symbol "c"]]
       )
-      `shouldBe` Right (list [Symbol "b", Symbol "c"])
+      `shouldBe` Right (ValueExt (list [Symbol "b", Symbol "c"]))
   it "cdr of singleton is null" $
     execute (list [Symbol "cdr", quote $ list [Symbol "a"]])
-      `shouldBe` Right Null
+      `shouldBe` Right (ValueExt Null)
   it "cons" $
     execute
       ( list
@@ -49,15 +58,15 @@ main = hspec $ do
           , quote $ list [Symbol "b", Symbol "c"]
           ]
       )
-      `shouldBe` Right (list [Symbol "a", Symbol "b", Symbol "c"])
+      `shouldBe` Right (ValueExt (list [Symbol "a", Symbol "b", Symbol "c"]))
   it "null? is true for null" $
-    execute (list [Symbol "null?", quote Null]) `shouldBe` Right (Bool True)
+    execute (list [Symbol "null?", quote Null]) `shouldBe` Right (ValueExt (Bool True))
   it "null? is false for non-null" $
     execute (list [Symbol "null?", quote $ list [Symbol "a"]])
-      `shouldBe` Right (Bool False)
+      `shouldBe` Right (ValueExt (Bool False))
   it "addition works" $
     execute (list [Symbol "+", Number 1, Number 1])
-      `shouldBe` Right (Number 2)
+      `shouldBe` Right (ValueExt (Number 2))
   it "simple if" $
     execute
       ( list
@@ -66,7 +75,7 @@ main = hspec $ do
           , quote $ Symbol "a"
           ]
       )
-      `shouldBe` Right (Symbol "a")
+      `shouldBe` Right (ValueExt (Symbol "a"))
   it "if with else" $
     execute
       ( list
@@ -76,16 +85,70 @@ main = hspec $ do
           , quote $ Symbol "b"
           ]
       )
-      `shouldBe` Right (Symbol "b")
+      `shouldBe` Right (ValueExt (Symbol "b"))
   it "simple lambda" $
     execute
       ( list
+          [ lambda ["x"] $ Symbol "x"
+          , quote $ Symbol "a"
+          ]
+      )
+      `shouldBe` Right (ValueExt (Symbol "a"))
+  it "lambda with multiple arguments" $
+    execute
+      ( list
+          [ lambda ["x", "y"] $ Symbol "y"
+          , quote $ Symbol "a"
+          , quote $ Symbol "b"
+          ]
+      )
+      `shouldBe` Right (ValueExt (Symbol "b"))
+
+  it "nested lambdas" $
+    execute
+      ( list
           [ list
-              [ Symbol "lambda"
-              , list [Symbol "x"]
-              , Symbol "x"
+              [ lambda ["x"] $ lambda ["y"] $ Symbol "y"
+              , quote $ Symbol "a"
+              ]
+          , quote $ Symbol "b"
+          ]
+      )
+      `shouldBe` Right (ValueExt (Symbol "b"))
+
+  it "shadowed variable" $
+    execute
+      ( list
+          [ list
+              [ lambda ["x"] $ lambda ["x"] $ Symbol "x"
+              , quote $ Symbol "a"
+              ]
+          , quote $ Symbol "b"
+          ]
+      )
+      `shouldBe` Right (ValueExt (Symbol "b"))
+
+  it "list function" $
+    execute
+      ( list
+          [ Symbol "list"
+          , quote $ Symbol "a"
+          , quote $ Symbol "b"
+          ]
+      )
+      `shouldBe` Right (ValueExt (list [Symbol "a", Symbol "b"]))
+
+  it "lambda in list" $
+    execute
+      ( list
+          [ list
+              [ Symbol "car"
+              , list
+                  [ Symbol "list"
+                  , lambda ["x"] $ Symbol "x"
+                  ]
               ]
           , quote $ Symbol "a"
           ]
       )
-      `shouldBe` Right (Symbol "a")
+      `shouldBe` Right (ValueExt (Symbol "a"))
