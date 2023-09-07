@@ -11,21 +11,21 @@ import Data.Foldable (foldrM)
 import Data.Map (Map)
 import Data.Map qualified as Map
 
-type Proc = [ValueExt] -> Either SchemeError ValueExt
+type Proc = [ValueEx] -> Either SchemeError ValueEx
 
-type Env = Map String ValueExt
+type Env = Map String ValueEx
 
 data Stage = Interpret | Evaluate
 
 newtype SType = SType Bool
 
-data ValueExt = forall ty. ValueExt (Value ty 'Evaluate)
+data ValueEx = forall ty. ValueEx (Value ty 'Evaluate)
 
-instance Eq ValueExt where
-  (ValueExt a) == (ValueExt b) = valEq a b
+instance Eq ValueEx where
+  (ValueEx a) == (ValueEx b) = valEq a b
 
-instance Show ValueExt where
-  show (ValueExt a) = show a
+instance Show ValueEx where
+  show (ValueEx a) = show a
 
 data Value (ty :: SType) (s :: Stage) where
   Bool :: Bool -> Value ('SType 'False) s
@@ -83,8 +83,8 @@ data Expr where
 list :: [Value ('SType 'False) a] -> Value ('SType 'False) a
 list = foldr Pair Null
 
-list' :: [ValueExt] -> ValueExt
-list' = ValueExt . foldr (\(ValueExt v) -> Pair v) Null
+list' :: [ValueEx] -> ValueEx
+list' = ValueEx . foldr (\(ValueEx v) -> Pair v) Null
 
 quote :: Value ('SType 'False) 'Interpret -> Value ('SType 'False) 'Interpret
 quote d = list [Symbol "quote", d]
@@ -104,7 +104,7 @@ specials =
       ( "quote"
       , \case
           [a] -> Right (Value $ castValue a)
-          args -> Left (WrongNumArgs "quote" (ValueExt . castValue <$> args))
+          args -> Left (WrongNumArgs "quote" (ValueEx . castValue <$> args))
       )
     ,
       ( "if"
@@ -113,8 +113,8 @@ specials =
             If <$> interpret tst <*> interpret t <*> case f of
               [] -> Right Nothing
               [e] -> Just <$> interpret e
-              _ -> Left (WrongNumArgs "if" (ValueExt . castValue <$> args))
-          args -> Left (WrongNumArgs "if" (ValueExt . castValue <$> args))
+              _ -> Left (WrongNumArgs "if" (ValueEx . castValue <$> args))
+          args -> Left (WrongNumArgs "if" (ValueEx . castValue <$> args))
       )
     ,
       ( "lambda"
@@ -138,7 +138,7 @@ specials =
                           <*> ( case body of
                                   [b] -> interpret b
                                   _ ->
-                                    Left $ BadArgs "lambda" (ValueExt . castValue <$> body)
+                                    Left $ BadArgs "lambda" (ValueEx . castValue <$> body)
                               )
                       )
           [] -> Left (WrongNumArgs "lambda" [])
@@ -150,26 +150,26 @@ procs =
   Map.fromList
     [ unary "car" $
         \case
-          ValueExt (Pair a _) -> Just (ValueExt a)
+          ValueEx (Pair a _) -> Just (ValueEx a)
           _ -> Nothing
     , unary "cdr" $ \case
-        ValueExt (Pair _ b) -> Just (ValueExt b)
+        ValueEx (Pair _ b) -> Just (ValueEx b)
         _ -> Nothing
     ,
       ( "cons"
       , \case
-          [ValueExt a, ValueExt b] -> Right (ValueExt $ Pair a b)
+          [ValueEx a, ValueEx b] -> Right (ValueEx $ Pair a b)
           args -> Left (BadArgs "cons" args)
       )
     , unary "null?" $ \case
-        ValueExt Null -> Just (ValueExt $ Bool True)
-        _ -> Just (ValueExt $ Bool False)
+        ValueEx Null -> Just (ValueEx $ Bool True)
+        _ -> Just (ValueEx $ Bool False)
     ,
       ( "+"
       , \args ->
           foldrM
-            (\(ValueExt a) (ValueExt b) -> maybe (Left $ BadArgs "+" args) (Right . ValueExt) $ add a b)
-            (ValueExt $ Number 0)
+            (\(ValueEx a) (ValueEx b) -> maybe (Left $ BadArgs "+" args) (Right . ValueEx) $ add a b)
+            (ValueEx $ Number 0)
             args
       )
     ,
@@ -180,7 +180,7 @@ procs =
  where
   unary ::
     String ->
-    (ValueExt -> Maybe ValueExt) ->
+    (ValueEx -> Maybe ValueEx) ->
     (String, Proc)
   unary name f =
     ( name
@@ -197,8 +197,8 @@ data SchemeError where
   NotInScope :: String -> SchemeError
   ArgsNotAList :: SchemeError
   ApplyingNonProc :: SchemeError
-  WrongNumArgs :: String -> [ValueExt] -> SchemeError
-  BadArgs :: String -> [ValueExt] -> SchemeError
+  WrongNumArgs :: String -> [ValueEx] -> SchemeError
+  BadArgs :: String -> [ValueEx] -> SchemeError
   Undefined :: SchemeError
   BadVar :: SchemeError
   deriving (Eq, Show)
@@ -224,12 +224,12 @@ interpretList v = case interpretImproperList v of
   (args, Null) -> Right args
   _ -> Left ArgsNotAList
 
-evaluate :: Env -> Expr -> Either SchemeError ValueExt
+evaluate :: Env -> Expr -> Either SchemeError ValueEx
 evaluate e (Var s) =
   maybe (Left $ NotInScope s) Right (Map.lookup s e)
-evaluate _ (Value d) = Right (ValueExt d)
+evaluate _ (Value d) = Right (ValueEx d)
 evaluate e (Call p args) = do
-  (ValueExt p') <- evaluate e p
+  (ValueEx p') <- evaluate e p
   args' <- traverse (evaluate e) args
   case p' of
     Builtin f -> f args'
@@ -238,14 +238,14 @@ evaluate e (Call p args) = do
       evaluate (e' <> e) body
     _ -> Left ApplyingNonProc
 evaluate e (If tst t f) = do
-  (ValueExt tst') <- evaluate e tst
+  (ValueEx tst') <- evaluate e tst
   case tst' of
     Bool False -> case f of
       Nothing -> Left Undefined
       Just f' -> evaluate e f'
     _ -> evaluate e t
 
-zipArgs :: [String] -> [ValueExt] -> Maybe String -> Either SchemeError Env
+zipArgs :: [String] -> [ValueEx] -> Maybe String -> Either SchemeError Env
 zipArgs [] [] mv =
   Right $ Map.empty <> maybe Map.empty (\v -> Map.singleton v (list' [])) mv
 zipArgs (s : ss) (a : as) v = Map.insert s a <$> zipArgs ss as v
@@ -253,5 +253,5 @@ zipArgs [] as (Just v) = Right $ Map.singleton v (list' as)
 zipArgs [] as Nothing = Left (WrongNumArgs "lambda" as)
 zipArgs (_ : _) [] _ = Left (WrongNumArgs "lambda" [])
 
-execute :: Value ('SType 'False) 'Interpret -> Either SchemeError ValueExt
-execute = interpret >=> evaluate (ValueExt . Builtin <$> procs)
+execute :: Value ('SType 'False) 'Interpret -> Either SchemeError ValueEx
+execute = interpret >=> evaluate (ValueEx . Builtin <$> procs)
