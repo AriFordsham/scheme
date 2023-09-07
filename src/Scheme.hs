@@ -5,7 +5,6 @@
 
 module Scheme where
 
-import Control.Monad ((>=>))
 import Data.Bifunctor (Bifunctor (first))
 import Data.Foldable (foldrM)
 import Data.Map (Map)
@@ -17,7 +16,7 @@ type Env = Map String ValueEx
 
 data Stage = Interpret | Evaluate
 
-newtype SType = SType Bool
+data SType = Prim | Proc
 
 data ValueEx = forall ty. ValueEx (Value ty 'Evaluate)
 
@@ -28,15 +27,14 @@ instance Show ValueEx where
   show (ValueEx a) = show a
 
 data Value (ty :: SType) (s :: Stage) where
-  Bool :: Bool -> Value ('SType 'False) s
-  Char :: Char -> Value ('SType 'False) s
-  Null :: Value ('SType 'False) s
-  Number :: Int -> Value ('SType 'False) s
-  Pair :: Value a s -> Value b s -> Value ('SType 'False) s
-  Symbol :: String -> Value ('SType 'False) s
-  Builtin :: Proc -> Value ('SType 'True) 'Evaluate
-  Lambda :: [String] -> Maybe String -> Expr -> Value ('SType 'True) 'Evaluate
-  CastProc :: Value ty 'Evaluate -> Value ('SType 'True) 'Evaluate
+  Bool :: Bool -> Value 'Prim s
+  Char :: Char -> Value 'Prim s
+  Null :: Value 'Prim s
+  Number :: Int -> Value 'Prim s
+  Pair :: Value a s -> Value b s -> Value 'Prim s
+  Symbol :: String -> Value 'Prim s
+  Builtin :: Proc -> Value 'Proc 'Evaluate
+  Lambda :: [String] -> Maybe String -> ExprEx -> Value 'Proc 'Evaluate
 
 instance Eq (Value ty s) where
   (==) = valEq
@@ -51,7 +49,7 @@ valEq a b = case (a, b) of
   (Symbol a', Symbol b') -> a' == b'
   (_, _) -> False
 
-castValue :: Value ty 'Interpret -> Value ('SType 'False) s
+castValue :: Value ty 'Interpret -> Value 'Prim s
 castValue = \case
   Bool b -> Bool b
   Char c -> Char c
@@ -70,26 +68,45 @@ instance Show (Value ty s) where
     Symbol s -> "Symbol " <> show s
     Builtin _ -> "Builtin"
     Lambda{} -> "Lambda"
-    CastProc _ -> "CastProc"
 
-data Expr where
-  Var :: String -> Expr
-  Value :: Value ty 'Evaluate -> Expr
-  Call :: Expr -> [Expr] -> Expr
-  If :: Expr -> Expr -> (Maybe Expr) -> Expr
+data ExprEx = forall ty. ExprEx (Expr ty)
 
--- deriving (Eq, Show)
+instance Eq ExprEx where
+  ExprEx a == ExprEx b = exprEq a b
 
-list :: [Value ('SType 'False) a] -> Value ('SType 'False) a
+instance Show ExprEx where
+  show (ExprEx a) = show a
+
+data Expr (ty :: SType) where
+  Var :: String -> Expr ty
+  Value :: Value ty 'Evaluate -> Expr ty
+  Call :: ExprEx -> [ExprEx] -> Expr ty
+  If :: ExprEx -> ExprEx -> (Maybe ExprEx) -> Expr ty
+
+instance Show (Expr ty) where
+  show = \case
+    Var s -> "Var " <> s
+    Value v -> "Value " <> show v
+    Call p arg -> "Call " <> show p <> " " <> show arg
+    If t th e -> "If " <> show t <> " " <> show th <> " " <> show e
+
+exprEq :: Expr a -> Expr b -> Bool
+exprEq (Var a) (Var b) = a == b
+exprEq (Value a) (Value b) = valEq a b
+exprEq (Call pa arga) (Call pb argb) = pa == pb && arga == argb
+exprEq (If ta tha ea) (If tb thb eb) = ta == tb && tha == thb && ea == eb
+exprEq _ _ = False
+
+list :: [Value 'Prim a] -> Value 'Prim a
 list = foldr Pair Null
 
 list' :: [ValueEx] -> ValueEx
 list' = ValueEx . foldr (\(ValueEx v) -> Pair v) Null
 
-quote :: Value ('SType 'False) 'Interpret -> Value ('SType 'False) 'Interpret
+quote :: Value 'Prim 'Interpret -> Value 'Prim 'Interpret
 quote d = list [Symbol "quote", d]
 
-lambda :: [String] -> Value ('SType 'False) 'Interpret -> Value ('SType 'False) 'Interpret
+lambda :: [String] -> Value 'Prim 'Interpret -> Value 'Prim 'Interpret
 lambda args body =
   list
     [ Symbol "lambda"
@@ -97,23 +114,24 @@ lambda args body =
     , body
     ]
 
-specials :: Map String ([Value ('SType 'False) 'Interpret] -> Either SchemeError Expr)
+specials :: Map String ([Value 'Prim 'Interpret] -> Either SchemeError ExprEx)
 specials =
   Map.fromList
     [
       ( "quote"
       , \case
-          [a] -> Right (Value $ castValue a)
+          [a] -> Right (ExprEx . Value $ castValue a)
           args -> Left (WrongNumArgs "quote" (ValueEx . castValue <$> args))
       )
     ,
       ( "if"
       , \case
           args@(tst : t : f) ->
-            If <$> interpret tst <*> interpret t <*> case f of
-              [] -> Right Nothing
-              [e] -> Just <$> interpret e
-              _ -> Left (WrongNumArgs "if" (ValueEx . castValue <$> args))
+            fmap ExprEx $
+              If <$> interpret tst <*> interpret t <*> case f of
+                [] -> Right Nothing
+                [e] -> Just <$> interpret e
+                _ -> Left (WrongNumArgs "if" (ValueEx . castValue <$> args))
           args -> Left (WrongNumArgs "if" (ValueEx . castValue <$> args))
       )
     ,
@@ -122,25 +140,29 @@ specials =
           (args : body) ->
             case interpretImproperList args of
               (args', var) ->
-                Value
-                  <$> ( Lambda
-                          <$> traverse
-                            ( \case
-                                Symbol s -> Right s
-                                _ -> Left BadVar
-                            )
-                            args'
-                          <*> ( case var of
-                                  Null -> Right Nothing
-                                  Symbol s -> Right (Just s)
+                fmap ExprEx $
+                  Value
+                    <$> ( Lambda
+                            <$> traverse
+                              ( \case
+                                  Symbol s -> Right s
                                   _ -> Left BadVar
                               )
-                          <*> ( case body of
-                                  [b] -> interpret b
-                                  _ ->
-                                    Left $ BadArgs "lambda" (ValueEx . castValue <$> body)
-                              )
-                      )
+                              args'
+                            <*> ( case var of
+                                    Null -> Right Nothing
+                                    Symbol s -> Right (Just s)
+                                    _ -> Left BadVar
+                                )
+                            <*> ( case body of
+                                    [b] -> interpret b
+                                    _ ->
+                                      Left $
+                                        BadArgs
+                                          "lambda"
+                                          (ValueEx . castValue <$> body)
+                                )
+                        )
           [] -> Left (WrongNumArgs "lambda" [])
       )
     ]
@@ -168,7 +190,9 @@ procs =
       ( "+"
       , \args ->
           foldrM
-            (\(ValueEx a) (ValueEx b) -> maybe (Left $ BadArgs "+" args) (Right . ValueEx) $ add a b)
+            ( \(ValueEx a) (ValueEx b) ->
+                maybe (Left $ BadArgs "+" args) (Right . ValueEx) $ add a b
+            )
             (ValueEx $ Number 0)
             args
       )
@@ -189,7 +213,7 @@ procs =
         args -> Left (WrongNumArgs name args)
     )
 
-  add :: Value l 'Evaluate -> Value r 'Evaluate -> Maybe (Value ('SType 'False) 'Evaluate)
+  add :: Value l 'Evaluate -> Value r 'Evaluate -> Maybe (Value 'Prim 'Evaluate)
   add (Number a) (Number b) = Just (Number (a + b))
   add _ _ = Nothing
 
@@ -203,46 +227,54 @@ data SchemeError where
   BadVar :: SchemeError
   deriving (Eq, Show)
 
-interpret :: Value ('SType 'False) 'Interpret -> Either SchemeError Expr
-interpret (Symbol s) = Right (Var s)
+interpret :: Value 'Prim 'Interpret -> Either SchemeError ExprEx
+interpret (Symbol s) = Right (ExprEx $ Var s)
 interpret (Pair p args) = do
   args' <- interpretList (castValue args)
   case p of
     Symbol s -> maybe (mkCall p args') ($ args') (Map.lookup s specials)
     _ -> mkCall (castValue p) args'
  where
-  mkCall :: Value ('SType 'False) 'Interpret -> [Value ('SType 'False) 'Interpret] -> Either SchemeError Expr
-  mkCall p' args' = Call <$> interpret p' <*> traverse interpret args'
-interpret d = Right (Value $ castValue d)
+  mkCall ::
+    Value 'Prim 'Interpret ->
+    [Value 'Prim 'Interpret] ->
+    Either SchemeError ExprEx
+  mkCall p' args' =
+    fmap ExprEx $
+      Call <$> interpret p' <*> traverse interpret args'
+interpret d = Right (ExprEx . Value $ castValue d)
 
-interpretImproperList :: Value ('SType 'False) 'Interpret -> ([Value ('SType 'False) 'Interpret], Value ('SType 'False) 'Interpret)
-interpretImproperList (Pair a b) = first (castValue a :) (interpretImproperList (castValue b))
+interpretImproperList ::
+  Value 'Prim 'Interpret -> ([Value 'Prim 'Interpret], Value 'Prim 'Interpret)
+interpretImproperList (Pair a b) =
+  first (castValue a :) (interpretImproperList (castValue b))
 interpretImproperList d = ([], d)
 
-interpretList :: Value ('SType 'False) 'Interpret -> Either SchemeError [Value ('SType 'False) 'Interpret]
+interpretList ::
+  Value 'Prim 'Interpret -> Either SchemeError [Value 'Prim 'Interpret]
 interpretList v = case interpretImproperList v of
   (args, Null) -> Right args
   _ -> Left ArgsNotAList
 
-evaluate :: Env -> Expr -> Either SchemeError ValueEx
+evaluate :: Env -> Expr ty -> Either SchemeError ValueEx
 evaluate e (Var s) =
   maybe (Left $ NotInScope s) Right (Map.lookup s e)
 evaluate _ (Value d) = Right (ValueEx d)
-evaluate e (Call p args) = do
+evaluate e (Call (ExprEx p) args) = do
   (ValueEx p') <- evaluate e p
-  args' <- traverse (evaluate e) args
+  args' <- traverse (\(ExprEx a) -> evaluate e a) args
   case p' of
     Builtin f -> f args'
-    Lambda args'' var body -> do
+    Lambda args'' var (ExprEx body) -> do
       e' <- zipArgs args'' args' var
       evaluate (e' <> e) body
     _ -> Left ApplyingNonProc
-evaluate e (If tst t f) = do
+evaluate e (If (ExprEx tst) (ExprEx t) f) = do
   (ValueEx tst') <- evaluate e tst
   case tst' of
     Bool False -> case f of
       Nothing -> Left Undefined
-      Just f' -> evaluate e f'
+      Just (ExprEx f') -> evaluate e f'
     _ -> evaluate e t
 
 zipArgs :: [String] -> [ValueEx] -> Maybe String -> Either SchemeError Env
@@ -253,5 +285,7 @@ zipArgs [] as (Just v) = Right $ Map.singleton v (list' as)
 zipArgs [] as Nothing = Left (WrongNumArgs "lambda" as)
 zipArgs (_ : _) [] _ = Left (WrongNumArgs "lambda" [])
 
-execute :: Value ('SType 'False) 'Interpret -> Either SchemeError ValueEx
-execute = interpret >=> evaluate (ValueEx . Builtin <$> procs)
+execute :: Value 'Prim 'Interpret -> Either SchemeError ValueEx
+execute e = do
+  ExprEx e' <- interpret e
+  evaluate (ValueEx . Builtin <$> procs) e'
