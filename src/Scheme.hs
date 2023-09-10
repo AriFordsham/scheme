@@ -18,6 +18,10 @@ data Stage = Interpret | Evaluate
 
 data SType = Prim | Proc
 
+data STypeS (ty :: SType) where
+  PrimS :: STypeS 'Prim
+  ProcS :: STypeS 'Proc
+
 data ValueEx = forall ty. ValueEx (Value ty 'Evaluate)
 
 instance Eq ValueEx where
@@ -35,6 +39,17 @@ data Value (ty :: SType) (s :: Stage) where
   Symbol :: String -> Value 'Prim s
   Builtin :: Proc -> Value 'Proc 'Evaluate
   Lambda :: [String] -> Maybe String -> ExprEx -> Value 'Proc 'Evaluate
+
+valueToSing :: Value ty 'Evaluate -> STypeS ty
+valueToSing = \case
+  Bool{} -> PrimS
+  Char{} -> PrimS
+  Null -> PrimS
+  Number{} -> PrimS
+  Pair{} -> PrimS
+  Symbol{} -> PrimS
+  Builtin{} -> ProcS
+  Lambda{} -> ProcS
 
 instance Eq (Value ty s) where
   (==) = valEq
@@ -80,8 +95,9 @@ instance Show ExprEx where
 data Expr (ty :: SType) where
   Var :: String -> Expr ty
   Value :: Value ty 'Evaluate -> Expr ty
-  Call :: ExprEx -> [ExprEx] -> Expr ty
+  Call :: Expr 'Proc -> [ExprEx] -> Expr ty
   If :: ExprEx -> ExprEx -> (Maybe ExprEx) -> Expr ty
+  CastProc :: ExprEx -> Expr 'Proc
 
 instance Show (Expr ty) where
   show = \case
@@ -89,19 +105,20 @@ instance Show (Expr ty) where
     Value v -> "Value " <> show v
     Call p arg -> "Call " <> show p <> " " <> show arg
     If t th e -> "If " <> show t <> " " <> show th <> " " <> show e
-
+    CastProc e -> "CastProc " <> show e
+ 
 exprEq :: Expr a -> Expr b -> Bool
 exprEq (Var a) (Var b) = a == b
 exprEq (Value a) (Value b) = valEq a b
-exprEq (Call pa arga) (Call pb argb) = pa == pb && arga == argb
+exprEq (Call pa arga) (Call pb argb) = exprEq pa pb && arga == argb
 exprEq (If ta tha ea) (If tb thb eb) = ta == tb && tha == thb && ea == eb
 exprEq _ _ = False
 
 list :: [Value 'Prim a] -> Value 'Prim a
 list = foldr Pair Null
 
-list' :: [ValueEx] -> ValueEx
-list' = ValueEx . foldr (\(ValueEx v) -> Pair v) Null
+list' :: [ValueEx] -> Value 'Prim 'Evaluate
+list' = foldr (\(ValueEx v) -> Pair v) Null
 
 quote :: Value 'Prim 'Interpret -> Value 'Prim 'Interpret
 quote d = list [Symbol "quote", d]
@@ -198,7 +215,7 @@ procs =
       )
     ,
       ( "list"
-      , Right . list'
+      , Right . ValueEx . list'
       )
     ]
  where
@@ -241,7 +258,7 @@ interpret (Pair p args) = do
     Either SchemeError ExprEx
   mkCall p' args' =
     fmap ExprEx $
-      Call <$> interpret p' <*> traverse interpret args'
+      Call <$> (CastProc <$> interpret p') <*> traverse interpret args'
 interpret d = Right (ExprEx . Value $ castValue d)
 
 interpretImproperList ::
@@ -260,7 +277,7 @@ evaluate :: Env -> Expr ty -> Either SchemeError ValueEx
 evaluate e (Var s) =
   maybe (Left $ NotInScope s) Right (Map.lookup s e)
 evaluate _ (Value d) = Right (ValueEx d)
-evaluate e (Call (ExprEx p) args) = do
+evaluate e (Call p args) = do
   (ValueEx p') <- evaluate e p
   args' <- traverse (\(ExprEx a) -> evaluate e a) args
   case p' of
@@ -276,12 +293,20 @@ evaluate e (If (ExprEx tst) (ExprEx t) f) = do
       Nothing -> Left Undefined
       Just (ExprEx f') -> evaluate e f'
     _ -> evaluate e t
+evaluate e (CastProc (ExprEx ex)) = do
+  (ValueEx v) <- evaluate e ex
+  ValueEx <$> castProc v
+
+castProc :: Value ty 'Evaluate -> Either SchemeError (Value 'Proc 'Evaluate)
+castProc v = case valueToSing v of
+  ProcS -> Right v
+  PrimS -> Left ApplyingNonProc
 
 zipArgs :: [String] -> [ValueEx] -> Maybe String -> Either SchemeError Env
 zipArgs [] [] mv =
-  Right $ Map.empty <> maybe Map.empty (\v -> Map.singleton v (list' [])) mv
+  Right $ Map.empty <> maybe Map.empty (\v -> Map.singleton v (ValueEx $ list' [])) mv
 zipArgs (s : ss) (a : as) v = Map.insert s a <$> zipArgs ss as v
-zipArgs [] as (Just v) = Right $ Map.singleton v (list' as)
+zipArgs [] as (Just v) = Right $ Map.singleton v (ValueEx $ list' as)
 zipArgs [] as Nothing = Left (WrongNumArgs "lambda" as)
 zipArgs (_ : _) [] _ = Left (WrongNumArgs "lambda" [])
 
