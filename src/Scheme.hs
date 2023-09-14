@@ -2,6 +2,7 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE LambdaCase #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Scheme where
 
@@ -92,12 +93,12 @@ instance Eq ExprEx where
 instance Show ExprEx where
   show (ExprEx a) = show a
 
-data Expr (ty :: SType) where
-  Var :: String -> Expr ty
-  Value :: Value ty 'Evaluate -> Expr ty
-  Call :: Expr 'Proc -> [ExprEx] -> Expr ty
-  If :: ExprEx -> ExprEx -> (Maybe ExprEx) -> Expr ty
-  CastProc :: ExprEx -> Expr 'Proc
+data Expr (mty :: Maybe SType) where
+  Var :: String -> Expr 'Nothing
+  Value :: Value ty 'Evaluate -> Expr ('Just ty)
+  Call :: Expr ('Just 'Proc) -> [ExprEx] -> Expr 'Nothing
+  If :: ExprEx -> ExprEx -> (Maybe ExprEx) -> Expr 'Nothing
+  CastProc :: Expr 'Nothing -> Expr ('Just 'Proc)
 
 instance Show (Expr ty) where
   show = \case
@@ -106,7 +107,7 @@ instance Show (Expr ty) where
     Call p arg -> "Call " <> show p <> " " <> show arg
     If t th e -> "If " <> show t <> " " <> show th <> " " <> show e
     CastProc e -> "CastProc " <> show e
- 
+
 exprEq :: Expr a -> Expr b -> Bool
 exprEq (Var a) (Var b) = a == b
 exprEq (Value a) (Value b) = valEq a b
@@ -249,16 +250,28 @@ interpret (Symbol s) = Right (ExprEx $ Var s)
 interpret (Pair p args) = do
   args' <- interpretList (castValue args)
   case p of
-    Symbol s -> maybe (mkCall p args') ($ args') (Map.lookup s specials)
-    _ -> mkCall (castValue p) args'
+    Symbol s ->
+      maybe
+        (ExprEx <$> mkCall p args')
+        ($ args')
+        (Map.lookup s specials)
+    _ -> ExprEx <$> mkCall (castValue p) args'
  where
   mkCall ::
     Value 'Prim 'Interpret ->
     [Value 'Prim 'Interpret] ->
-    Either SchemeError ExprEx
-  mkCall p' args' =
-    fmap ExprEx $
-      Call <$> (CastProc <$> interpret p') <*> traverse interpret args'
+    Either SchemeError (Expr 'Nothing)
+  mkCall p' args' = do
+    (ExprEx e) <- interpret p'
+    e' <- case e of
+      Var{} -> Right $ CastProc e
+      Value v -> case valueToSing v of
+        ProcS -> Right e
+        PrimS -> Left ApplyingNonProc
+      Call{} -> Right $ CastProc e
+      If{} -> Right $ CastProc e
+      CastProc{} -> Right e
+    Call e' <$> traverse interpret args'
 interpret d = Right (ExprEx . Value $ castValue d)
 
 interpretImproperList ::
@@ -272,45 +285,3 @@ interpretList ::
 interpretList v = case interpretImproperList v of
   (args, Null) -> Right args
   _ -> Left ArgsNotAList
-
-evaluate :: Env -> Expr ty -> Either SchemeError ValueEx
-evaluate e (Var s) =
-  maybe (Left $ NotInScope s) Right (Map.lookup s e)
-evaluate _ (Value d) = Right (ValueEx d)
-evaluate e (Call p args) = do
-  (ValueEx p') <- evaluate e p
-  args' <- traverse (\(ExprEx a) -> evaluate e a) args
-  case p' of
-    Builtin f -> f args'
-    Lambda args'' var (ExprEx body) -> do
-      e' <- zipArgs args'' args' var
-      evaluate (e' <> e) body
-    _ -> Left ApplyingNonProc
-evaluate e (If (ExprEx tst) (ExprEx t) f) = do
-  (ValueEx tst') <- evaluate e tst
-  case tst' of
-    Bool False -> case f of
-      Nothing -> Left Undefined
-      Just (ExprEx f') -> evaluate e f'
-    _ -> evaluate e t
-evaluate e (CastProc (ExprEx ex)) = do
-  (ValueEx v) <- evaluate e ex
-  ValueEx <$> castProc v
-
-castProc :: Value ty 'Evaluate -> Either SchemeError (Value 'Proc 'Evaluate)
-castProc v = case valueToSing v of
-  ProcS -> Right v
-  PrimS -> Left ApplyingNonProc
-
-zipArgs :: [String] -> [ValueEx] -> Maybe String -> Either SchemeError Env
-zipArgs [] [] mv =
-  Right $ Map.empty <> maybe Map.empty (\v -> Map.singleton v (ValueEx $ list' [])) mv
-zipArgs (s : ss) (a : as) v = Map.insert s a <$> zipArgs ss as v
-zipArgs [] as (Just v) = Right $ Map.singleton v (ValueEx $ list' as)
-zipArgs [] as Nothing = Left (WrongNumArgs "lambda" as)
-zipArgs (_ : _) [] _ = Left (WrongNumArgs "lambda" [])
-
-execute :: Value 'Prim 'Interpret -> Either SchemeError ValueEx
-execute e = do
-  ExprEx e' <- interpret e
-  evaluate (ValueEx . Builtin <$> procs) e'

@@ -7,11 +7,12 @@ import Test.Hspec
 import Scheme (
   Value (Bool, Char, Null, Number, Symbol),
   ValueEx (ValueEx),
-  execute,
   lambda,
   list,
   quote,
  )
+
+import Evaluate(execute)
 
 main :: IO ()
 main = hspec $ do

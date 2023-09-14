@@ -19,7 +19,9 @@ common warnings
 
 library
   import:           warnings
-  exposed-modules:  Scheme
+  exposed-modules:  
+    , Scheme
+    , Evaluate
 
   -- other-modules:
   -- other-extensions:
