@@ -20,10 +20,6 @@
               final.haskell-nix.hix.project {
                 src = ./.;
                 evalSystem = "x86_64-linux";
-                shell.tools = {
-                  hlint = {};
-                  haskell-language-server = {};
-                };
                 shell.buildInputs = with pkgs; [
                   nixfmt
                 ];

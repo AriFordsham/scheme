@@ -56,8 +56,8 @@ type family Evaluate' (ty :: Maybe SType) :: Type where
 
 castProc :: Value ty 'Evaluate -> Either SchemeError (Value 'Proc 'Evaluate)
 castProc v = case valueToSing v of
-  ProcS -> Right v
-  PrimS -> Left ApplyingNonProc
+  SProc -> Right v
+  SPrim -> Left ApplyingNonProc
 
 execute :: Value 'Prim 'Interpret -> Either SchemeError ValueEx
 execute e = interpret e >>= evaluate (ValueEx . Builtin <$> procs)

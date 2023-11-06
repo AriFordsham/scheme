@@ -3,6 +3,7 @@
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TemplateHaskell #-}
 
 module Scheme where
 
@@ -11,17 +12,16 @@ import Data.Foldable (foldrM)
 import Data.Map (Map)
 import Data.Map qualified as Map
 
+import Data.Singletons.TH (genSingletons)
+
+data SType = Prim | Proc
+genSingletons [''SType]
+
 type Proc = [ValueEx] -> Either SchemeError ValueEx
 
 type Env = Map String ValueEx
 
 data Stage = Interpret | Evaluate
-
-data SType = Prim | Proc
-
-data STypeS (ty :: SType) where
-  PrimS :: STypeS 'Prim
-  ProcS :: STypeS 'Proc
 
 data ValueEx = forall ty. ValueEx (Value ty 'Evaluate)
 
@@ -41,16 +41,16 @@ data Value (ty :: SType) (s :: Stage) where
   Builtin :: Proc -> Value 'Proc 'Evaluate
   Lambda :: [String] -> Maybe String -> ExprEx -> Value 'Proc 'Evaluate
 
-valueToSing :: Value ty 'Evaluate -> STypeS ty
+valueToSing :: Value ty 'Evaluate -> SSType ty
 valueToSing = \case
-  Bool{} -> PrimS
-  Char{} -> PrimS
-  Null -> PrimS
-  Number{} -> PrimS
-  Pair{} -> PrimS
-  Symbol{} -> PrimS
-  Builtin{} -> ProcS
-  Lambda{} -> ProcS
+  Bool{} -> SPrim
+  Char{} -> SPrim
+  Null -> SPrim
+  Number{} -> SPrim
+  Pair{} -> SPrim
+  Symbol{} -> SPrim
+  Builtin{} -> SProc
+  Lambda{} -> SProc
 
 instance Eq (Value ty s) where
   (==) = valEq
@@ -266,8 +266,8 @@ interpret (Pair p args) = do
     e' <- case e of
       Var{} -> Right $ CastProc e
       Value v -> case valueToSing v of
-        ProcS -> Right e
-        PrimS -> Left ApplyingNonProc
+        SProc -> Right e
+        SPrim -> Left ApplyingNonProc
       Call{} -> Right $ CastProc e
       If{} -> Right $ CastProc e
       CastProc{} -> Right e
