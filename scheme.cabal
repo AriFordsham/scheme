@@ -23,7 +23,8 @@ library
     , Scheme
     , Evaluate
 
-  -- other-modules:
+  other-modules:
+    , Nary
   -- other-extensions:
   build-depends:
     , base        ^>=4.16.4.0

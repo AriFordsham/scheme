@@ -2,8 +2,8 @@
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE ImpredicativeTypes #-}
 {-# LANGUAGE LambdaCase #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
 
 module Scheme where
 
@@ -11,8 +11,11 @@ import Data.Bifunctor (Bifunctor (first))
 import Data.Foldable (foldrM)
 import Data.Map (Map)
 import Data.Map qualified as Map
+import Data.Maybe (mapMaybe)
 
 import Data.Singletons.TH (genSingletons)
+
+import Nary (Nary, nary)
 
 data SType = Prim | Proc
 genSingletons [''SType]
@@ -135,105 +138,108 @@ lambda args body =
 specials :: Map String ([Value 'Prim 'Interpret] -> Either SchemeError ExprEx)
 specials =
   Map.fromList
-    [
-      ( "quote"
-      , \case
-          [a] -> Right (ExprEx . Value $ castValue a)
-          args -> Left (WrongNumArgs "quote" (ValueEx . castValue <$> args))
-      )
-    ,
-      ( "if"
-      , \case
-          args@(tst : t : f) ->
-            fmap ExprEx $
-              If <$> interpret tst <*> interpret t <*> case f of
-                [] -> Right Nothing
-                [e] -> Just <$> interpret e
-                _ -> Left (WrongNumArgs "if" (ValueEx . castValue <$> args))
-          args -> Left (WrongNumArgs "if" (ValueEx . castValue <$> args))
-      )
-    ,
-      ( "lambda"
-      , \case
-          (args : body) ->
-            case interpretImproperList args of
-              (args', var) ->
-                fmap ExprEx $
-                  Value
-                    <$> ( Lambda
-                            <$> traverse
-                              ( \case
-                                  Symbol s -> Right s
-                                  _ -> Left BadVar
-                              )
-                              args'
-                            <*> ( case var of
-                                    Null -> Right Nothing
-                                    Symbol s -> Right (Just s)
-                                    _ -> Left BadVar
-                                )
-                            <*> ( case body of
-                                    [b] -> interpret b
-                                    _ ->
-                                      Left $
-                                        BadArgs
-                                          "lambda"
-                                          (ValueEx . castValue <$> body)
-                                )
-                        )
-          [] -> Left (WrongNumArgs "lambda" [])
-      )
+    [ special "quote" quote_
+    , special "if" if_
+    , special "lambda" lambda_
     ]
+ where
+  special ::
+    Nary t (Value 'Prim 'Interpret) (Either SchemeError a) =>
+    String ->
+    t ->
+    (String, [Value 'Prim 'Interpret] -> Either SchemeError a)
+  special s f = (s, listArg (ValueEx . castValue) id s f)
+
+  quote_ :: Value 'Prim 'Interpret -> Either SchemeError ExprEx
+  quote_ = Right . ExprEx . Value . castValue
+
+  if_ ::
+    Value 'Prim 'Interpret ->
+    Value 'Prim 'Interpret ->
+    Maybe (Value 'Prim 'Interpret) ->
+    Either SchemeError ExprEx
+  if_ tst t f =
+    fmap ExprEx $ If <$> interpret tst <*> interpret t <*> traverse interpret f
+
+  lambda_ ::
+    Value 'Prim 'Interpret ->
+    Value 'Prim 'Interpret ->
+    Either SchemeError ExprEx
+  lambda_ args body =
+    case interpretImproperList args of
+      (args', var) ->
+        ExprEx . Value
+          <$> ( Lambda
+                  <$> traverse
+                    ( \case
+                        Symbol s -> Right s
+                        _ -> Left BadVar
+                    )
+                    args'
+                  <*> ( case var of
+                          Null -> Right Nothing
+                          Symbol s -> Right (Just s)
+                          _ -> Left BadVar
+                      )
+                  <*> interpret body
+              )
+
+listArg ::
+  Nary t a b =>
+  (a -> ValueEx) ->
+  (b -> Either SchemeError c) ->
+  String ->
+  t ->
+  [a] ->
+  Either SchemeError c
+listArg f g s v args = maybe (wrongNumArgs s $ fmap f args) g (nary v args)
+
+wrongNumArgs :: String -> [ValueEx] -> Either SchemeError a
+wrongNumArgs s = Left . WrongNumArgs s
 
 procs :: Map String Proc
 procs =
   Map.fromList
-    [ unary "car" $
-        \case
-          ValueEx (Pair a _) -> Just (ValueEx a)
-          _ -> Nothing
-    , unary "cdr" $ \case
-        ValueEx (Pair _ b) -> Just (ValueEx b)
-        _ -> Nothing
-    ,
-      ( "cons"
-      , \case
-          [ValueEx a, ValueEx b] -> Right (ValueEx $ Pair a b)
-          args -> Left (BadArgs "cons" args)
-      )
-    , unary "null?" $ \case
-        ValueEx Null -> Just (ValueEx $ Bool True)
-        _ -> Just (ValueEx $ Bool False)
+    [ proc' "car" $ \(ValueEx a) -> car_ a
+    , proc' "cdr" $ \(ValueEx a) -> cdr_ a
+    , proc' "cons" $ \(ValueEx a) (ValueEx b) -> Just (ValueEx $ Pair a b)
+    , proc' "null?" $
+        Just . ValueEx . Bool . \case
+          ValueEx Null -> True
+          _ -> False
     ,
       ( "+"
       , \args ->
-          foldrM
-            ( \(ValueEx a) (ValueEx b) ->
-                maybe (Left $ BadArgs "+" args) (Right . ValueEx) $ add a b
-            )
-            (ValueEx $ Number 0)
-            args
+          toBad "+" args
+            . fmap (ValueEx . Number . sum)
+            . traverse (\(ValueEx a) -> toNumber a)
+            $ args
       )
-    ,
-      ( "list"
-      , Right . ValueEx . list'
-      )
+    , ("list", Right . ValueEx . list')
     ]
  where
-  unary ::
+  proc' ::
+    (Nary t ValueEx (Maybe ValueEx)) =>
     String ->
-    (ValueEx -> Maybe ValueEx) ->
+    t ->
     (String, Proc)
-  unary name f =
-    ( name
-    , \case
-        [a] -> maybe (Left $ BadArgs name [a]) Right (f a)
-        args -> Left (WrongNumArgs name args)
-    )
+  proc' s f =
+    (s,) $ \as -> listArg id (toBad s as) s f as
 
-  add :: Value l 'Evaluate -> Value r 'Evaluate -> Maybe (Value 'Prim 'Evaluate)
-  add (Number a) (Number b) = Just (Number (a + b))
-  add _ _ = Nothing
+  toBad :: String -> [ValueEx] -> Maybe b -> Either SchemeError b
+  toBad s as = maybe (Left $ BadArgs s as) Right
+
+  car_ :: Value a 'Evaluate -> Maybe ValueEx
+  car_ (Pair a _) = Just (ValueEx a)
+  car_ _ = Nothing
+
+  cdr_ :: Value a 'Evaluate -> Maybe ValueEx
+  cdr_ (Pair _ b) = Just (ValueEx b)
+  cdr_ _ = Nothing
+
+  toNumber :: Value a 'Evaluate -> Maybe Int
+  toNumber (Number n) = Just n
+  toNumber _ = Nothing
 
 data SchemeError where
   NotInScope :: String -> SchemeError
