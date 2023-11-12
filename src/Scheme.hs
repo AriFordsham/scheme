@@ -8,10 +8,8 @@
 module Scheme where
 
 import Data.Bifunctor (Bifunctor (first))
-import Data.Foldable (foldrM)
 import Data.Map (Map)
 import Data.Map qualified as Map
-import Data.Maybe (mapMaybe)
 
 import Data.Singletons.TH (genSingletons)
 
