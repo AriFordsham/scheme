@@ -14,8 +14,8 @@ import Scheme
 type Env = Map String ValueEx
 
 
-evaluate :: Env -> ExprEx -> Either SchemeError ValueEx
-evaluate e (ExprEx ex) = case exprToSing ex of
+evaluate :: Env -> Expr mty -> Either SchemeError ValueEx
+evaluate e ex = case exprToSing ex of
   SNothing -> evaluateUntyped e ex
   SJust{} -> ValueEx <$> evaluateTyped e ex
 
@@ -30,7 +30,7 @@ evaluateTyped e (Call p args) = do
       e' <- zipArgs args'' args' var
       evaluateTyped (e' <> e) body
 evaluateTyped e (CastProc ex) = do
-  (ValueEx v) <- evaluate e (ExprEx ex)
+  (ValueEx v) <- evaluate e ex
   case valueToSing v of
     SProc SNothing -> Right v
     SProc (SJust{}) -> case v of
@@ -52,7 +52,7 @@ evaluateUntyped e (If tst t f) = do
   case tst' of
     Bool False -> maybe (Right $ ValueEx Null) (evaluate e) f
     _ -> evaluate e t
-evaluateUntyped e (Upcast e') = evaluate e (ExprEx e')
+evaluateUntyped e (Upcast e') = evaluate e e'
 
 zipArgs :: [String] -> [ValueEx] -> Maybe String -> Either SchemeError Env
 zipArgs [] [] mv =

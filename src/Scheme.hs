@@ -85,19 +85,11 @@ instance Show (Value ty s) where
     Builtin _ -> "Builtin"
     Lambda{} -> "Lambda"
 
-data ExprEx = forall mty. ExprEx (Expr mty)
-
-instance Eq ExprEx where
-  ExprEx a == ExprEx b = exprEq a b
-
-instance Show ExprEx where
-  show (ExprEx a) = show a
-
 data Expr (mty :: Maybe SType) where
   Var :: String -> Expr 'Nothing
   Value :: Value ty 'Evaluate -> Expr ('Just ty)
-  Call :: Expr ('Just ('Proc mty)) -> [ExprEx] -> Expr mty
-  If :: ExprEx -> ExprEx -> (Maybe ExprEx) -> Expr 'Nothing
+  Call :: Expr ('Just ('Proc mty)) -> [Expr 'Nothing] -> Expr mty
+  If :: Expr 'Nothing -> Expr 'Nothing -> (Maybe (Expr 'Nothing)) -> Expr 'Nothing
   CastProc :: Expr mty -> Expr ('Just ('Proc 'Nothing))
   Upcast :: Expr mty -> Expr 'Nothing
 
@@ -120,11 +112,16 @@ instance Show (Expr mty) where
     CastProc e -> "CastProc " <> show e
     Upcast e -> "Upcast " <> show e
 
+instance Eq (Expr mty) where
+  a == b = exprEq a b
+
 exprEq :: Expr a -> Expr b -> Bool
 exprEq (Var a) (Var b) = a == b
 exprEq (Value a) (Value b) = valEq a b
-exprEq (Call pa arga) (Call pb argb) = exprEq pa pb && arga == argb
-exprEq (If ta tha ea) (If tb thb eb) = ta == tb && tha == thb && ea == eb
+exprEq (Call pa arga) (Call pb argb) = 
+  exprEq pa pb && and (zipWith exprEq arga argb)
+exprEq (If ta tha ea) (If tb thb eb) = 
+  exprEq ta tb && exprEq tha thb && (exprEq <$> ea <*> eb) == Just True
 exprEq _ _ = False
 
 list :: [Value 'Prim a] -> Value 'Prim a
@@ -144,7 +141,7 @@ lambda args body =
     , body
     ]
 
-specials :: Map String ([Value 'Prim 'Interpret] -> Either SchemeError ExprEx)
+specials :: Map String ([Value 'Prim 'Interpret] -> Either SchemeError (Expr 'Nothing))
 specials =
   Map.fromList
     [ special "quote" quote_
@@ -159,25 +156,24 @@ specials =
     (String, [Value 'Prim 'Interpret] -> Either SchemeError a)
   special s f = (s, listArg (ValueEx . castValue) id s f)
 
-  quote_ :: Value 'Prim 'Interpret -> Either SchemeError ExprEx
-  quote_ = Right . ExprEx . Value . castValue
+  quote_ :: Value 'Prim 'Interpret -> Either SchemeError (Expr 'Nothing)
+  quote_ = Right . Upcast . Value . castValue
 
   if_ ::
     Value 'Prim 'Interpret ->
     Value 'Prim 'Interpret ->
     Maybe (Value 'Prim 'Interpret) ->
-    Either SchemeError ExprEx
-  if_ tst t f =
-    fmap ExprEx $ If <$> interpret tst <*> interpret t <*> traverse interpret f
+    Either SchemeError (Expr 'Nothing)
+  if_ tst t f = If <$> interpret tst <*> interpret t <*> traverse interpret f
 
   lambda_ ::
     Value 'Prim 'Interpret ->
     Value 'Prim 'Interpret ->
-    Either SchemeError ExprEx
+    Either SchemeError (Expr 'Nothing)
   lambda_ args body = do
     let (args', var) = interpretImproperList args
-    ExprEx body' <- interpret body
-    ExprEx . Value
+    body' <- interpret body
+    Upcast . Value
       <$> ( Lambda
               <$> traverse
                 ( \case
@@ -260,17 +256,17 @@ data SchemeError where
   BadVar :: SchemeError
   deriving (Eq, Show)
 
-interpret :: Value 'Prim 'Interpret -> Either SchemeError ExprEx
-interpret (Symbol s) = Right (ExprEx $ Var s)
+interpret :: Value 'Prim 'Interpret -> Either SchemeError (Expr 'Nothing)
+interpret (Symbol s) = Right (Var s)
 interpret (Pair p args) = do
   args' <- interpretList (castValue args)
   case p of
     Symbol s ->
       maybe
-        (ExprEx <$> mkCall p args')
+        (mkCall p args')
         ($ args')
         (Map.lookup s specials)
-    _ -> ExprEx <$> mkCall (castValue p) args'
+    _ -> mkCall (castValue p) args'
  where
   mkCall ::
     Value 'Prim 'Interpret ->
@@ -279,15 +275,17 @@ interpret (Pair p args) = do
   mkCall p' args' = do
     e' <- interpret p' >>= validateProc
     Call e' <$> traverse interpret args'
-interpret d = Right (ExprEx . Value $ castValue d)
+interpret d = Right (Upcast . Value $ castValue d)
 
-validateProc :: ExprEx -> Either SchemeError (Expr ('Just ('Proc 'Nothing)))
-validateProc (ExprEx p') =
-  case exprToSing p' of
-    SNothing -> Right $ CastProc p'
+validateProc :: 
+  Expr 'Nothing -> Either SchemeError (Expr ('Just ('Proc 'Nothing)))
+validateProc (Upcast e) =
+  case exprToSing e of
+    SNothing -> Right $ CastProc e
     SJust SPrim -> Left ApplyingNonProc
-    SJust (SProc SNothing) -> Right p'
-    SJust (SProc (SJust _)) -> Right $ CastProc p'
+    SJust (SProc SNothing) -> Right e
+    SJust (SProc (SJust _)) -> Right $ CastProc e
+validateProc e = Right $ CastProc e
 
 interpretImproperList ::
   Value 'Prim 'Interpret -> ([Value 'Prim 'Interpret], Value 'Prim 'Interpret)
