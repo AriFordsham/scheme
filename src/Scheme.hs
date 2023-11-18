@@ -4,20 +4,23 @@
 {-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 module Scheme where
 
 import Data.Bifunctor (Bifunctor (first))
 import Data.Map (Map)
 import Data.Map qualified as Map
-
 import Data.Maybe.Singletons
-import Data.Singletons.TH (genSingletons)
+import Data.Singletons.TH (genSingletons, singDecideInstance)
+import Data.Type.Equality (testEquality, type (:~:) (Refl))
 
 import Nary (Nary, nary)
 
 data SType = Prim | Proc (Maybe SType)
+  deriving (Eq)
 genSingletons [''SType]
+singDecideInstance ''SType
 
 type Proc = [ValueEx] -> Either SchemeError ValueEx
 
@@ -89,9 +92,20 @@ data Expr (mty :: Maybe SType) where
   Var :: String -> Expr 'Nothing
   Value :: Value ty 'Evaluate -> Expr ('Just ty)
   Call :: Expr ('Just ('Proc mty)) -> [Expr 'Nothing] -> Expr mty
-  If :: Expr 'Nothing -> Expr 'Nothing -> (Maybe (Expr 'Nothing)) -> Expr 'Nothing
-  CastProc :: Expr mty -> Expr ('Just ('Proc 'Nothing))
-  Upcast :: Expr mty -> Expr 'Nothing
+  If ::
+    Expr 'Nothing -> Expr 'Nothing -> (Maybe (Expr 'Nothing)) -> Expr 'Nothing
+  Dynamic :: SSType ty -> Expr 'Nothing -> Expr ('Just ty)
+  Erase :: Expr ('Just ty) -> Expr 'Nothing
+
+dynamic :: SSType ty -> Expr 'Nothing -> Either SchemeError (Expr ('Just ty))
+dynamic ty (Erase e) = cast ty e
+dynamic ty e = Right $ Dynamic ty e
+
+cast :: SSType t1 -> Expr ('Just t2) -> Either SchemeError (Expr ('Just t1))
+cast ty e =
+  case testEquality (SJust ty) (exprToSing e) of
+    Just Refl -> Right e
+    Nothing -> Left TypeError
 
 exprToSing :: Expr mty -> SMaybe mty
 exprToSing = \case
@@ -100,8 +114,8 @@ exprToSing = \case
   Call e _ -> case exprToSing e of
     SJust (SProc mty) -> mty
   If{} -> SNothing
-  CastProc{} -> SJust (SProc SNothing)
-  Upcast{} -> SNothing
+  Dynamic ty _ -> SJust ty
+  Erase{} -> SNothing
 
 instance Show (Expr mty) where
   show = \case
@@ -109,8 +123,8 @@ instance Show (Expr mty) where
     Value v -> "Value " <> show v
     Call p arg -> "Call " <> show p <> " " <> show arg
     If t th e -> "If " <> show t <> " " <> show th <> " " <> show e
-    CastProc e -> "CastProc " <> show e
-    Upcast e -> "Upcast " <> show e
+    Dynamic _ e -> "Dynamic " <> show e
+    Erase e -> "Erase " <> show e
 
 instance Eq (Expr mty) where
   a == b = exprEq a b
@@ -118,9 +132,9 @@ instance Eq (Expr mty) where
 exprEq :: Expr a -> Expr b -> Bool
 exprEq (Var a) (Var b) = a == b
 exprEq (Value a) (Value b) = valEq a b
-exprEq (Call pa arga) (Call pb argb) = 
+exprEq (Call pa arga) (Call pb argb) =
   exprEq pa pb && and (zipWith exprEq arga argb)
-exprEq (If ta tha ea) (If tb thb eb) = 
+exprEq (If ta tha ea) (If tb thb eb) =
   exprEq ta tb && exprEq tha thb && (exprEq <$> ea <*> eb) == Just True
 exprEq _ _ = False
 
@@ -141,7 +155,8 @@ lambda args body =
     , body
     ]
 
-specials :: Map String ([Value 'Prim 'Interpret] -> Either SchemeError (Expr 'Nothing))
+specials ::
+  Map String ([Value 'Prim 'Interpret] -> Either SchemeError (Expr 'Nothing))
 specials =
   Map.fromList
     [ special "quote" quote_
@@ -157,7 +172,7 @@ specials =
   special s f = (s, listArg (ValueEx . castValue) id s f)
 
   quote_ :: Value 'Prim 'Interpret -> Either SchemeError (Expr 'Nothing)
-  quote_ = Right . Upcast . Value . castValue
+  quote_ = Right . Erase . Value . castValue
 
   if_ ::
     Value 'Prim 'Interpret ->
@@ -173,7 +188,7 @@ specials =
   lambda_ args body = do
     let (args', var) = interpretImproperList args
     body' <- interpret body
-    Upcast . Value
+    Erase . Value
       <$> ( Lambda
               <$> traverse
                 ( \case
@@ -249,7 +264,7 @@ procs =
 data SchemeError where
   NotInScope :: String -> SchemeError
   ArgsNotAList :: SchemeError
-  ApplyingNonProc :: SchemeError
+  TypeError :: SchemeError
   WrongNumArgs :: String -> [ValueEx] -> SchemeError
   BadArgs :: String -> [ValueEx] -> SchemeError
   Undefined :: SchemeError
@@ -273,19 +288,22 @@ interpret (Pair p args) = do
     [Value 'Prim 'Interpret] ->
     Either SchemeError (Expr 'Nothing)
   mkCall p' args' = do
-    e' <- interpret p' >>= validateProc
-    Call e' <$> traverse interpret args'
-interpret d = Right (Upcast . Value $ castValue d)
+    p'' <- interpret p'
+    validateProc' p'' >>= \f -> f $ \e' ->
+      case exprToSing e' of
+        SJust (SProc SNothing) -> Call e' <$> traverse interpret args'
+        SJust (SProc (SJust{})) -> Erase . Call e' <$> traverse interpret args'
 
-validateProc :: 
-  Expr 'Nothing -> Either SchemeError (Expr ('Just ('Proc 'Nothing)))
-validateProc (Upcast e) =
+interpret d = Right (Erase . Value $ castValue d)
+
+validateProc' ::
+  Expr 'Nothing ->
+  Either SchemeError ((forall ty. Expr ('Just ('Proc ty)) -> r) -> r)
+validateProc' (Erase e) =
   case exprToSing e of
-    SNothing -> Right $ CastProc e
-    SJust SPrim -> Left ApplyingNonProc
-    SJust (SProc SNothing) -> Right e
-    SJust (SProc (SJust _)) -> Right $ CastProc e
-validateProc e = Right $ CastProc e
+    SJust SPrim -> Left TypeError
+    SJust (SProc{}) -> Right $ \f -> f e
+validateProc' e = (\e' f -> f e') <$> dynamic (SProc SNothing) e
 
 interpretImproperList ::
   Value 'Prim 'Interpret -> ([Value 'Prim 'Interpret], Value 'Prim 'Interpret)

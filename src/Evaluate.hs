@@ -7,6 +7,8 @@ module Evaluate where
 import Data.Map ( Map )
 import Data.Map qualified as Map
 
+import Data.Type.Equality
+
 import Data.Maybe.Singletons
 
 import Scheme
@@ -29,14 +31,12 @@ evaluateTyped e (Call p args) = do
     Lambda args'' var body -> do
       e' <- zipArgs args'' args' var
       evaluateTyped (e' <> e) body
-evaluateTyped e (CastProc ex) = do
-  (ValueEx v) <- evaluate e ex
-  case valueToSing v of
-    SProc SNothing -> Right v
-    SProc (SJust{}) -> case v of
-      Lambda args var e' -> Right $ Lambda args var (Upcast e')
-    SPrim -> Left ApplyingNonProc
-
+evaluateTyped e (Dynamic ty ex) = do
+  (ValueEx v) <- evaluateUntyped e ex
+  case testEquality ty (valueToSing v) of
+    Just Refl -> Right v
+    Nothing -> Left TypeError
+ 
 evaluateUntyped :: Env -> Expr 'Nothing -> Either SchemeError ValueEx
 evaluateUntyped e (Var s) = maybe (Left $ NotInScope s) Right (Map.lookup s e)
 evaluateUntyped e (Call p args) = do
@@ -52,7 +52,7 @@ evaluateUntyped e (If tst t f) = do
   case tst' of
     Bool False -> maybe (Right $ ValueEx Null) (evaluate e) f
     _ -> evaluate e t
-evaluateUntyped e (Upcast e') = evaluate e e'
+evaluateUntyped e (Erase e') = evaluate e e'
 
 zipArgs :: [String] -> [ValueEx] -> Maybe String -> Either SchemeError Env
 zipArgs [] [] mv =

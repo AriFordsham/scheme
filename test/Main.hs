@@ -5,7 +5,7 @@ module Main (main) where
 import Test.Hspec
 
 import Scheme (
-  SchemeError (ApplyingNonProc),
+  SchemeError (TypeError),
   Value (Bool, Char, Null, Number, Symbol),
   ValueEx (ValueEx),
   interpret,
@@ -25,7 +25,7 @@ main = hspec $ do
           ( list
               [Number 1, Number 2]
           )
-        `shouldBe` Left ApplyingNonProc
+        `shouldBe` Left TypeError
   describe "evaluator tests" $ do
     it "Booleans evaluate to themselves" $
       execute (Bool True) `shouldBe` Right (ValueEx (Bool True))
