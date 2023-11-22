@@ -4,7 +4,7 @@
 
 module Evaluate where
 
-import Data.Map ( Map )
+import Data.Map (Map)
 import Data.Map qualified as Map
 
 import Data.Type.Equality
@@ -15,14 +15,13 @@ import Scheme
 
 type Env = Map String ValueEx
 
-
-evaluate :: Env -> Expr mty -> Either SchemeError ValueEx
-evaluate e ex = case exprToSing ex of
+evaluate :: Env -> ExprEx -> Either SchemeError ValueEx
+evaluate e (ExprEx ex) = case exprToSing ex of
   SNothing -> evaluateUntyped e ex
   SJust{} -> ValueEx <$> evaluateTyped e ex
 
-evaluateTyped :: Env -> 
-  Expr ('Just ty) -> Either SchemeError (Value ty 'Evaluate)
+evaluateTyped ::
+  Env -> Expr ('Just ty) -> Either SchemeError (Value ty 'Evaluate)
 evaluateTyped _ (Value d) = Right d
 evaluateTyped e (Call p args) = do
   p' <- evaluateTyped e p
@@ -36,7 +35,7 @@ evaluateTyped e (Dynamic ty ex) = do
   case testEquality ty (valueToSing v) of
     Just Refl -> Right v
     Nothing -> Left TypeError
- 
+
 evaluateUntyped :: Env -> Expr 'Nothing -> Either SchemeError ValueEx
 evaluateUntyped e (Var s) = maybe (Left $ NotInScope s) Right (Map.lookup s e)
 evaluateUntyped e (Call p args) = do
@@ -52,7 +51,6 @@ evaluateUntyped e (If tst t f) = do
   case tst' of
     Bool False -> maybe (Right $ ValueEx Null) (evaluate e) f
     _ -> evaluate e t
-evaluateUntyped e (Erase e') = evaluate e e'
 
 zipArgs :: [String] -> [ValueEx] -> Maybe String -> Either SchemeError Env
 zipArgs [] [] mv =

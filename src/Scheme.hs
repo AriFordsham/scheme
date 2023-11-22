@@ -88,18 +88,20 @@ instance Show (Value ty s) where
     Builtin _ -> "Builtin"
     Lambda{} -> "Lambda"
 
+data ExprEx = forall mty. ExprEx (Expr mty)
+
+instance Show ExprEx where
+  show (ExprEx e) = "ExprEx " <> show e
+
+instance Eq ExprEx where
+  ExprEx e1 == ExprEx e2 = exprEq e1 e2
+
 data Expr (mty :: Maybe SType) where
   Var :: String -> Expr 'Nothing
   Value :: Value ty 'Evaluate -> Expr ('Just ty)
-  Call :: Expr ('Just ('Proc mty)) -> [Expr 'Nothing] -> Expr mty
-  If ::
-    Expr 'Nothing -> Expr 'Nothing -> (Maybe (Expr 'Nothing)) -> Expr 'Nothing
+  Call :: Expr ('Just ('Proc mty)) -> [ExprEx] -> Expr mty
+  If :: ExprEx -> ExprEx -> (Maybe ExprEx) -> Expr 'Nothing
   Dynamic :: SSType ty -> Expr 'Nothing -> Expr ('Just ty)
-  Erase :: Expr ('Just ty) -> Expr 'Nothing
-
-dynamic :: SSType ty -> Expr 'Nothing -> Either SchemeError (Expr ('Just ty))
-dynamic ty (Erase e) = cast ty e
-dynamic ty e = Right $ Dynamic ty e
 
 cast :: SSType t1 -> Expr ('Just t2) -> Either SchemeError (Expr ('Just t1))
 cast ty e =
@@ -115,7 +117,6 @@ exprToSing = \case
     SJust (SProc mty) -> mty
   If{} -> SNothing
   Dynamic ty _ -> SJust ty
-  Erase{} -> SNothing
 
 instance Show (Expr mty) where
   show = \case
@@ -124,7 +125,6 @@ instance Show (Expr mty) where
     Call p arg -> "Call " <> show p <> " " <> show arg
     If t th e -> "If " <> show t <> " " <> show th <> " " <> show e
     Dynamic _ e -> "Dynamic " <> show e
-    Erase e -> "Erase " <> show e
 
 instance Eq (Expr mty) where
   a == b = exprEq a b
@@ -133,9 +133,8 @@ exprEq :: Expr a -> Expr b -> Bool
 exprEq (Var a) (Var b) = a == b
 exprEq (Value a) (Value b) = valEq a b
 exprEq (Call pa arga) (Call pb argb) =
-  exprEq pa pb && and (zipWith exprEq arga argb)
-exprEq (If ta tha ea) (If tb thb eb) =
-  exprEq ta tb && exprEq tha thb && (exprEq <$> ea <*> eb) == Just True
+  exprEq pa pb && arga == argb
+exprEq (If ta tha ea) (If tb thb eb) = ta == tb && tha == thb && ea == eb
 exprEq _ _ = False
 
 list :: [Value 'Prim a] -> Value 'Prim a
@@ -156,7 +155,7 @@ lambda args body =
     ]
 
 specials ::
-  Map String ([Value 'Prim 'Interpret] -> Either SchemeError (Expr 'Nothing))
+  Map String ([Value 'Prim 'Interpret] -> Either SchemeError ExprEx)
 specials =
   Map.fromList
     [ special "quote" quote_
@@ -171,24 +170,28 @@ specials =
     (String, [Value 'Prim 'Interpret] -> Either SchemeError a)
   special s f = (s, listArg (ValueEx . castValue) id s f)
 
-  quote_ :: Value 'Prim 'Interpret -> Either SchemeError (Expr 'Nothing)
-  quote_ = Right . Erase . Value . castValue
+  quote_ :: Value 'Prim 'Interpret -> Either SchemeError ExprEx
+  quote_ = Right . ExprEx . Value . castValue
 
   if_ ::
     Value 'Prim 'Interpret ->
     Value 'Prim 'Interpret ->
     Maybe (Value 'Prim 'Interpret) ->
-    Either SchemeError (Expr 'Nothing)
-  if_ tst t f = If <$> interpret tst <*> interpret t <*> traverse interpret f
+    Either SchemeError ExprEx
+  if_ tst t f = do
+    tst' <- interpret tst
+    t' <- interpret t
+    f' <- traverse interpret f
+    pure $ ExprEx $ If tst' t' f'
 
   lambda_ ::
     Value 'Prim 'Interpret ->
     Value 'Prim 'Interpret ->
-    Either SchemeError (Expr 'Nothing)
+    Either SchemeError ExprEx
   lambda_ args body = do
     let (args', var) = interpretImproperList args
-    body' <- interpret body
-    Erase . Value
+    (ExprEx body') <- interpret body
+    ExprEx . Value
       <$> ( Lambda
               <$> traverse
                 ( \case
@@ -238,11 +241,7 @@ procs =
     , ("list", Right . ValueEx . list')
     ]
  where
-  proc' ::
-    (Nary t ValueEx (Maybe ValueEx)) =>
-    String ->
-    t ->
-    (String, Proc)
+  proc' :: (Nary t ValueEx (Maybe ValueEx)) => String -> t -> (String, Proc)
   proc' s f =
     (s,) $ \as -> listArg id (toBad s as) s f as
 
@@ -271,8 +270,8 @@ data SchemeError where
   BadVar :: SchemeError
   deriving (Eq, Show)
 
-interpret :: Value 'Prim 'Interpret -> Either SchemeError (Expr 'Nothing)
-interpret (Symbol s) = Right (Var s)
+interpret :: Value 'Prim 'Interpret -> Either SchemeError ExprEx
+interpret (Symbol s) = Right (ExprEx $ Var s)
 interpret (Pair p args) = do
   args' <- interpretList (castValue args)
   case p of
@@ -286,24 +285,20 @@ interpret (Pair p args) = do
   mkCall ::
     Value 'Prim 'Interpret ->
     [Value 'Prim 'Interpret] ->
-    Either SchemeError (Expr 'Nothing)
+    Either SchemeError ExprEx
   mkCall p' args' = do
-    p'' <- interpret p'
-    validateProc' p'' >>= \f -> f $ \e' ->
-      case exprToSing e' of
-        SJust (SProc SNothing) -> Call e' <$> traverse interpret args'
-        SJust (SProc (SJust{})) -> Erase . Call e' <$> traverse interpret args'
+    (ExprEx p'') <- interpret p'
+    case exprToSing p'' of
+      SNothing -> ExprEx <$> mkCall' (Dynamic (SProc SNothing) p'') args'
+      SJust SPrim -> Left TypeError
+      SJust (SProc{}) -> ExprEx <$> mkCall' p'' args'
 
-interpret d = Right (Erase . Value $ castValue d)
-
-validateProc' ::
-  Expr 'Nothing ->
-  Either SchemeError ((forall ty. Expr ('Just ('Proc ty)) -> r) -> r)
-validateProc' (Erase e) =
-  case exprToSing e of
-    SJust SPrim -> Left TypeError
-    SJust (SProc{}) -> Right $ \f -> f e
-validateProc' e = (\e' f -> f e') <$> dynamic (SProc SNothing) e
+  mkCall' ::
+    Expr ('Just ('Proc ty)) ->
+    [Value 'Prim 'Interpret] ->
+    Either SchemeError (Expr ty)
+  mkCall' p' args' = Call p' <$> traverse interpret args'
+interpret d = Right (ExprEx . Value $ castValue d)
 
 interpretImproperList ::
   Value 'Prim 'Interpret -> ([Value 'Prim 'Interpret], Value 'Prim 'Interpret)
