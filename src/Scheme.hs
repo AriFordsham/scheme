@@ -6,14 +6,30 @@
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE UndecidableInstances #-}
 
-module Scheme where
+module Scheme (
+  Expr (..),
+  Value (..),
+  ExprEx (ExprEx),
+  ValueEx (ValueEx),
+  SchemeError (..),
+  SType (..),
+  Stage (..),
+  interpret,
+  exprToSing,
+  valueToSing,
+  list,
+  list',
+  quote,
+  lambda,
+  Proc,
+  listArg,
+) where
 
 import Data.Bifunctor (Bifunctor (first))
 import Data.Map (Map)
 import Data.Map qualified as Map
 import Data.Maybe.Singletons
 import Data.Singletons.TH (genSingletons, singDecideInstance)
-import Data.Type.Equality (testEquality, type (:~:) (Refl))
 
 import Nary (Nary, nary)
 
@@ -102,12 +118,6 @@ data Expr (mty :: Maybe SType) where
   Call :: Expr ('Just ('Proc mty)) -> [ExprEx] -> Expr mty
   If :: ExprEx -> ExprEx -> (Maybe ExprEx) -> Expr 'Nothing
   Dynamic :: SSType ty -> Expr 'Nothing -> Expr ('Just ty)
-
-cast :: SSType t1 -> Expr ('Just t2) -> Either SchemeError (Expr ('Just t1))
-cast ty e =
-  case testEquality (SJust ty) (exprToSing e) of
-    Just Refl -> Right e
-    Nothing -> Left TypeError
 
 exprToSing :: Expr mty -> SMaybe mty
 exprToSing = \case
@@ -219,46 +229,6 @@ listArg f g s v args = maybe (wrongNumArgs s $ fmap f args) g (nary v args)
 
 wrongNumArgs :: String -> [ValueEx] -> Either SchemeError a
 wrongNumArgs s = Left . WrongNumArgs s
-
-procs :: Map String Proc
-procs =
-  Map.fromList
-    [ proc' "car" $ \(ValueEx a) -> car_ a
-    , proc' "cdr" $ \(ValueEx a) -> cdr_ a
-    , proc' "cons" $ \(ValueEx a) (ValueEx b) -> Just (ValueEx $ Pair a b)
-    , proc' "null?" $
-        Just . ValueEx . Bool . \case
-          ValueEx Null -> True
-          _ -> False
-    ,
-      ( "+"
-      , \args ->
-          toBad "+" args
-            . fmap (ValueEx . Number . sum)
-            . traverse (\(ValueEx a) -> toNumber a)
-            $ args
-      )
-    , ("list", Right . ValueEx . list')
-    ]
- where
-  proc' :: (Nary t ValueEx (Maybe ValueEx)) => String -> t -> (String, Proc)
-  proc' s f =
-    (s,) $ \as -> listArg id (toBad s as) s f as
-
-  toBad :: String -> [ValueEx] -> Maybe b -> Either SchemeError b
-  toBad s as = maybe (Left $ BadArgs s as) Right
-
-  car_ :: Value a 'Evaluate -> Maybe ValueEx
-  car_ (Pair a _) = Just (ValueEx a)
-  car_ _ = Nothing
-
-  cdr_ :: Value a 'Evaluate -> Maybe ValueEx
-  cdr_ (Pair _ b) = Just (ValueEx b)
-  cdr_ _ = Nothing
-
-  toNumber :: Value a 'Evaluate -> Maybe Int
-  toNumber (Number n) = Just n
-  toNumber _ = Nothing
 
 data SchemeError where
   NotInScope :: String -> SchemeError
